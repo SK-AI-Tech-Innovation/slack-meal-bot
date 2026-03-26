@@ -24,10 +24,8 @@ if _env_path.exists():
 # ==========================================
 SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL', '')
 
-# GitHub raw URL 베이스 (이미지 호스팅용)
-GITHUB_REPO = os.environ.get('GITHUB_REPO', 'SK-AI-Tech-Innovation/slack-meal-bot')
-GITHUB_BRANCH = os.environ.get('GITHUB_BRANCH', 'main')
-GITHUB_RAW_BASE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/images"
+# GitHub Pages URL 베이스 (이미지 호스팅용)
+GITHUB_PAGES_BASE = os.environ.get('GITHUB_PAGES_BASE', 'https://sk-ai-tech-innovation.github.io/slack-meal-bot/images')
 
 # 식당 정보
 CAMPUS_CODE = os.environ.get('CAMPUS_CODE', 'BD')
@@ -124,7 +122,7 @@ def send_to_slack(menu_list, downloaded_images):
         # GitHub raw URL로 이미지 첨부
         filename = downloaded_images.get(course)
         if filename:
-            attachment["image_url"] = f"{GITHUB_RAW_BASE}/{filename}"
+            attachment["image_url"] = f"{GITHUB_PAGES_BASE}/{filename}"
 
         attachments.append(attachment)
 
