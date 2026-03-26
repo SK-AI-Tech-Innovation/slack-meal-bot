@@ -77,7 +77,7 @@ def download_images(menu_list):
             os.remove(os.path.join(IMAGES_DIR, f))
 
     downloaded = {}  # course_name -> 파일명
-    for item in menu_list:
+    for idx, item in enumerate(menu_list):
         course = item.get('COURSE_NAME', '').strip()
         save_file_nm = item.get('SAVE_FILE_NM', '')
         source_url = build_source_image_url(save_file_nm)
@@ -87,8 +87,8 @@ def download_images(menu_list):
         try:
             resp = requests.get(source_url, verify=False, timeout=10)
             if resp.status_code == 200 and len(resp.content) > 1000:
-                # 파일명: 코너명.jpg (한글 포함 시 안전하게 인덱스 사용)
-                filename = f"course_{course}.jpg"
+                # 파일명: 인덱스 기반 영문 (GitHub raw URL 호환)
+                filename = f"course_{idx}.jpg"
                 filepath = os.path.join(IMAGES_DIR, filename)
                 with open(filepath, 'wb') as f:
                     f.write(resp.content)
@@ -137,15 +137,16 @@ def send_to_slack(menu_list, downloaded_images):
     print("✅ 슬랙 전송 성공!")
 
 
-def get_existing_images():
-    """images/ 폴더에 이미 다운로드된 이미지 목록 반환"""
+def get_existing_images(menu_list):
+    """images/ 폴더의 이미지를 메뉴 코너명에 매핑"""
     result = {}
     if not os.path.exists(IMAGES_DIR):
         return result
-    for f in os.listdir(IMAGES_DIR):
-        if f.startswith('course_') and f.endswith('.jpg'):
-            course = f.replace('course_', '').replace('.jpg', '')
-            result[course] = f
+    for idx, item in enumerate(menu_list):
+        course = item.get('COURSE_NAME', '').strip()
+        filename = f"course_{idx}.jpg"
+        if os.path.exists(os.path.join(IMAGES_DIR, filename)):
+            result[course] = filename
     return result
 
 
@@ -173,7 +174,7 @@ if __name__ == "__main__":
         download_images(menu_data)
     elif mode == '--send-only':
         # GitHub Actions: 이미 push된 이미지의 raw URL로 슬랙 전송
-        downloaded = get_existing_images()
+        downloaded = get_existing_images(menu_data)
         print(f"슬랙 전송 중... (이미지 {len(downloaded)}개)")
         send_to_slack(menu_data, downloaded)
     else:
