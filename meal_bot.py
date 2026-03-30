@@ -106,6 +106,7 @@ def download_images(menu_list):
         if f.endswith(('.jpg', '.png', '.jpeg')):
             os.remove(os.path.join(IMAGES_DIR, f))
 
+    today_str = datetime.datetime.now().strftime("%Y%m%d")
     downloaded = {}  # course_name -> (파일명, 바이트데이터)
     for idx, item in enumerate(menu_list):
         course = item.get('COURSE_NAME', '').strip()
@@ -114,7 +115,7 @@ def download_images(menu_list):
         if not source_url or not course:
             continue
 
-        filename = f"course_{idx}.jpg"
+        filename = f"course_{idx}_{today_str}.jpg"
         for attempt in range(MAX_RETRIES):
             try:
                 resp = requests.get(source_url, verify=False, timeout=15)
@@ -168,6 +169,38 @@ def push_images_to_github(downloaded):
             print(f"  📤 {course} GitHub push 완료")
         else:
             print(f"  ❌ {course} GitHub push 실패: {put_resp.status_code} {put_resp.text[:100]}")
+
+
+def cleanup_github_images():
+    """전송 완료 후 GitHub repo의 이미지 파일 삭제 (다음 날 잔여 이미지 방지)"""
+    if not GITHUB_TOKEN:
+        return
+
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+    # images/ 디렉토리의 파일 목록 조회
+    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/images"
+    resp = requests.get(api_url, headers=headers, params={"ref": GITHUB_BRANCH})
+    if resp.status_code != 200:
+        print(f"  ⚠️ GitHub 이미지 목록 조회 실패: {resp.status_code}")
+        return
+
+    for item in resp.json():
+        if item.get("name", "").startswith("course_") and item.get("name", "").endswith(".jpg"):
+            delete_url = item["url"]
+            payload = {
+                "message": f"chore: cleanup {item['name']}",
+                "sha": item["sha"],
+                "branch": GITHUB_BRANCH
+            }
+            del_resp = requests.delete(delete_url, headers=headers, json=payload)
+            if del_resp.status_code == 200:
+                print(f"  🗑️ {item['name']} 삭제 완료")
+            else:
+                print(f"  ⚠️ {item['name']} 삭제 실패: {del_resp.status_code}")
 
 
 def wait_for_pages_deploy():
@@ -259,16 +292,17 @@ def get_existing_images(menu_list):
     result = {}
     if not os.path.exists(IMAGES_DIR):
         return result
+    today_str = datetime.datetime.now().strftime("%Y%m%d")
     for idx, item in enumerate(menu_list):
         course = item.get('COURSE_NAME', '').strip()
-        filename = f"course_{idx}.jpg"
+        filename = f"course_{idx}_{today_str}.jpg"
         if os.path.exists(os.path.join(IMAGES_DIR, filename)):
             result[course] = filename
     return result
 
 
 def count_menu_images(menu_list):
-    """이미지가 있는 메뉴 코너 수 반환"""
+    """이미지가 업로드된 메뉴 코너 수 반환 (SAVE_FILE_NM 기준)"""
     count = 0
     for item in menu_list:
         if item.get('SAVE_FILE_NM', '').strip():
@@ -278,11 +312,11 @@ def count_menu_images(menu_list):
 
 def run_with_image_check():
     """
-    11:00~11:10: 이미지가 올라왔는지 주기적 체크, 올라오면 바로 전송
-    11:11: 이미지 없더라도 텍스트만 전송
+    11:00~11:10: 모든 코너 이미지가 올라왔는지 주기적 체크, 올라오면 바로 전송
+    11:11: 이미지가 모두 준비되지 않았으면 전송하지 않음
     """
-    deadline_minute = 11  # 11:11 이후에는 강제 전송
-    check_interval = 30   # 30초마다 체크
+    deadline_minute = 11  # 11:11 이후에도 이미지 미완료면 전송 안 함
+    check_interval = 60   # 60초마다 체크
 
     print("🕐 이미지 체크 모드 시작...")
 
@@ -301,35 +335,52 @@ def run_with_image_check():
             print("  오늘은 메뉴가 없습니다.")
             return
 
-        expected_images = count_menu_images(menu_data)
-        print(f"  메뉴 {len(menu_data)}개, 이미지 예상 {expected_images}개")
+        total_courses = len(menu_data)
+        uploaded_images = count_menu_images(menu_data)
+        print(f"  메뉴 {total_courses}개, 이미지 업로드됨 {uploaded_images}/{total_courses}개")
 
-        # 이미지 다운로드 시도
+        # 이미지가 모두 업로드되지 않았으면 다운로드 시도하지 않음
+        if uploaded_images < total_courses:
+            now = datetime.datetime.now()
+            past_deadline = now.hour >= 11 and now.minute >= deadline_minute
+            if not past_deadline:
+                print(f"  이미지 미완료 ({uploaded_images}/{total_courses}). {check_interval}초 후 재시도...")
+                time.sleep(check_interval)
+                continue
+            else:
+                print(f"  ⏰ 11:{deadline_minute:02d} 경과 — 이미지 {uploaded_images}/{total_courses}개만 업로드됨, 전송 건너뜀")
+                return
+
+        # 모든 이미지가 업로드된 경우에만 다운로드
         downloaded = download_images(menu_data)
         actual_images = len(downloaded)
-        print(f"  실제 다운로드: {actual_images}/{expected_images}개")
+        print(f"  실제 다운로드: {actual_images}/{total_courses}개")
 
-        # 전송 조건: 이미지가 모두 있거나, 11:11 이후
-        now = datetime.datetime.now()
-        past_deadline = now.hour >= 11 and now.minute >= deadline_minute
+        # 다운로드 실패한 이미지가 있으면 재시도
+        if actual_images < total_courses:
+            now = datetime.datetime.now()
+            past_deadline = now.hour >= 11 and now.minute >= deadline_minute
+            if not past_deadline:
+                print(f"  다운로드 미완료 ({actual_images}/{total_courses}). {check_interval}초 후 재시도...")
+                time.sleep(check_interval)
+                continue
+            else:
+                print(f"  ⏰ 11:{deadline_minute:02d} 경과 — 다운로드 {actual_images}/{total_courses}개만 성공, 전송 건너뜀")
+                return
 
-        if actual_images >= expected_images or past_deadline:
-            if actual_images < expected_images:
-                print(f"  ⏰ 11:{deadline_minute} 경과 — 이미지 {actual_images}/{expected_images}개로 전송")
-
-            # GitHub push + Pages 배포 대기
-            if GITHUB_TOKEN and downloaded:
+        # GitHub: 기존 이미지 정리 → 새 이미지 push → Pages 배포 대기
+        if GITHUB_TOKEN:
+            print("  🗑️ GitHub 기존 이미지 정리 중...")
+            cleanup_github_images()
+            if downloaded:
                 print("  GitHub에 이미지 push 중...")
                 push_images_to_github(downloaded)
                 wait_for_pages_deploy()
 
-            _, hours = get_operating_hours()
-            print(f"  슬랙 전송 중... (이미지 {actual_images}개)")
-            send_to_slack(menu_data, downloaded, operating_hours=hours)
-            return
-
-        print(f"  이미지 미완료 ({actual_images}/{expected_images}). {check_interval}초 후 재시도...")
-        time.sleep(check_interval)
+        _, hours = get_operating_hours()
+        print(f"  슬랙 전송 중... (이미지 {actual_images}개)")
+        send_to_slack(menu_data, downloaded, operating_hours=hours)
+        return
 
 
 if __name__ == "__main__":
@@ -368,10 +419,14 @@ if __name__ == "__main__":
         print("이미지 다운로드 중...")
         downloaded = download_images(menu_data)
 
-        if GITHUB_TOKEN and downloaded:
-            print("GitHub에 이미지 push 중...")
-            push_images_to_github(downloaded)
-            wait_for_pages_deploy()
+        # GitHub: 기존 이미지 정리 → 새 이미지 push → Pages 배포 대기
+        if GITHUB_TOKEN:
+            print("🗑️ GitHub 기존 이미지 정리 중...")
+            cleanup_github_images()
+            if downloaded:
+                print("GitHub에 이미지 push 중...")
+                push_images_to_github(downloaded)
+                wait_for_pages_deploy()
 
         print(f"슬랙 전송 중... (이미지 {len(downloaded)}개)")
         send_to_slack(menu_data, downloaded, operating_hours=hours)

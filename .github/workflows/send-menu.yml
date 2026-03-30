@@ -2,8 +2,8 @@ name: Send Lunch Menu
 
 on:
   schedule:
-    # 평일 11:15 KST = 02:15 UTC
-    - cron: '15 2 * * 1-5'
+    # 평일 11:05 KST = 02:05 UTC
+    - cron: '5 2 * * 1-5'
   workflow_dispatch:  # 수동 실행용
 
 jobs:
