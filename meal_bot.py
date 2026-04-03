@@ -5,7 +5,10 @@ import sys
 import base64
 import time
 import urllib3
+import zoneinfo
 from pathlib import Path
+
+KST = zoneinfo.ZoneInfo("Asia/Seoul")
 
 # self-signed cert 경고 무시
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -68,7 +71,7 @@ def get_operating_hours():
 def get_today_menu():
     """mc.skhystec.com에서 오늘의 메뉴 목록 조회"""
     url = 'https://mc.skhystec.com/V3/prc/selectMenuList.prc'
-    today_str = datetime.datetime.now().strftime("%Y%m%d")
+    today_str = datetime.datetime.now(KST).strftime("%Y%m%d")
     data = {
         'campus': CAMPUS_CODE,
         'cafeteriaSeq': CAFETERIA_SEQ,
@@ -106,7 +109,7 @@ def download_images(menu_list):
         if f.endswith(('.jpg', '.png', '.jpeg')):
             os.remove(os.path.join(IMAGES_DIR, f))
 
-    today_str = datetime.datetime.now().strftime("%Y%m%d")
+    today_str = datetime.datetime.now(KST).strftime("%Y%m%d")
     downloaded = {}  # course_name -> (파일명, 바이트데이터)
     for idx, item in enumerate(menu_list):
         course = item.get('COURSE_NAME', '').strip()
@@ -230,7 +233,7 @@ def wait_for_pages_deploy():
 def send_to_slack(menu_list, downloaded_images, operating_hours=None):
     """Webhook으로 슬랙에 메뉴 전송 (이미지는 GitHub Pages URL)"""
     weekdays = ['월', '화', '수', '목', '금', '토', '일']
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(KST)
     today_str = now.strftime("%Y년 %m월 %d일") + f"({weekdays[now.weekday()]})"
     meal_name = {'LN': '점심', 'BF': '조식', 'DN': '석식', 'SN': '야식'}.get(MEAL_TYPE, '식사')
     colors = ["#FF9900", "#33CC33", "#3366FF", "#FF3366", "#9933CC", "#00BFFF", "#FFD700"]
@@ -292,7 +295,7 @@ def get_existing_images(menu_list):
     result = {}
     if not os.path.exists(IMAGES_DIR):
         return result
-    today_str = datetime.datetime.now().strftime("%Y%m%d")
+    today_str = datetime.datetime.now(KST).strftime("%Y%m%d")
     for idx, item in enumerate(menu_list):
         course = item.get('COURSE_NAME', '').strip()
         filename = f"course_{idx}_{today_str}.jpg"
@@ -313,15 +316,15 @@ def count_menu_images(menu_list):
 def run_with_image_check():
     """
     11:00~11:10: 모든 코너 이미지가 올라왔는지 주기적 체크, 올라오면 바로 전송
-    11:11: 이미지가 모두 준비되지 않았으면 전송하지 않음
+    11:11: 이미지가 모두 준비되지 않았으면 있는 것만으로 전송
     """
-    deadline_minute = 11  # 11:11 이후에도 이미지 미완료면 전송 안 함
+    deadline_minute = 11  # 11:11 이후에는 있는 이미지만으로 전송
     check_interval = 60   # 60초마다 체크
 
     print("🕐 이미지 체크 모드 시작...")
 
     while True:
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(KST)
 
         print(f"\n[{now.strftime('%H:%M:%S')}] 메뉴 조회 중...")
         menu_data = get_today_menu()
@@ -339,34 +342,32 @@ def run_with_image_check():
         uploaded_images = count_menu_images(menu_data)
         print(f"  메뉴 {total_courses}개, 이미지 업로드됨 {uploaded_images}/{total_courses}개")
 
-        # 이미지가 모두 업로드되지 않았으면 다운로드 시도하지 않음
+        # 이미지가 모두 업로드되지 않았으면 대기, deadline 지나면 있는 것만으로 진행
         if uploaded_images < total_courses:
-            now = datetime.datetime.now()
+            now = datetime.datetime.now(KST)
             past_deadline = now.hour >= 11 and now.minute >= deadline_minute
             if not past_deadline:
                 print(f"  이미지 미완료 ({uploaded_images}/{total_courses}). {check_interval}초 후 재시도...")
                 time.sleep(check_interval)
                 continue
             else:
-                print(f"  ⏰ 11:{deadline_minute:02d} 경과 — 이미지 {uploaded_images}/{total_courses}개만 업로드됨, 전송 건너뜀")
-                return
+                print(f"  ⏰ 11:{deadline_minute:02d} 경과 — 이미지 {uploaded_images}/{total_courses}개만 업로드됨, 있는 것만으로 전송")
 
-        # 모든 이미지가 업로드된 경우에만 다운로드
+        # 이미지 다운로드
         downloaded = download_images(menu_data)
         actual_images = len(downloaded)
         print(f"  실제 다운로드: {actual_images}/{total_courses}개")
 
-        # 다운로드 실패한 이미지가 있으면 재시도
+        # 다운로드 실패한 이미지가 있으면 재시도, deadline 지나면 있는 것만으로 진행
         if actual_images < total_courses:
-            now = datetime.datetime.now()
+            now = datetime.datetime.now(KST)
             past_deadline = now.hour >= 11 and now.minute >= deadline_minute
             if not past_deadline:
                 print(f"  다운로드 미완료 ({actual_images}/{total_courses}). {check_interval}초 후 재시도...")
                 time.sleep(check_interval)
                 continue
             else:
-                print(f"  ⏰ 11:{deadline_minute:02d} 경과 — 다운로드 {actual_images}/{total_courses}개만 성공, 전송 건너뜀")
-                return
+                print(f"  ⏰ 11:{deadline_minute:02d} 경과 — 다운로드 {actual_images}/{total_courses}개만 성공, 있는 것만으로 전송")
 
         # GitHub: 기존 이미지 정리 → 새 이미지 push → Pages 배포 대기
         if GITHUB_TOKEN:
