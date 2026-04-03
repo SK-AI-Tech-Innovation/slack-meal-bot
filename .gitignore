@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .env
+images/*.jpg
+images/*.png
+images/*.jpeg
