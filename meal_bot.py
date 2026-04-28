@@ -267,6 +267,10 @@ def send_to_slack(menu_list, downloaded_images, operating_hours=None):
     if operating_hours:
         context_elements.append({"type": "mrkdwn", "text": f"🕐 {operating_hours}"})
 
+    # 부분 전송 시 원본 메뉴 페이지 링크 추가
+    if len(downloaded_images) < len(menu_list):
+        context_elements.append({"type": "mrkdwn", "text": "🔗 <https://mc.skhystec.com/V3/menu.html|원본 메뉴 보기>"})
+
     payload = {
         "blocks": [
             {
@@ -315,10 +319,10 @@ def count_menu_images(menu_list):
 
 def run_with_image_check():
     """
-    11:00~11:10: 모든 코너 이미지가 올라왔는지 주기적 체크, 올라오면 바로 전송
-    11:11: 이미지가 모두 준비되지 않았으면 있는 것만으로 전송
+    11:00~11:20: 모든 코너 이미지가 올라왔는지 주기적 체크, 올라오면 바로 전송
+    11:20: 이미지가 모두 준비되지 않았으면 있는 것만으로 + 원본 링크 포함 전송
     """
-    deadline_minute = 11  # 11:11 이후에는 있는 이미지만으로 전송
+    deadline_minute = 20  # 11:20 이후에는 있는 이미지 + 원본 링크 fallback
     check_interval = 60   # 60초마다 체크
 
     print("🕐 이미지 체크 모드 시작...")
