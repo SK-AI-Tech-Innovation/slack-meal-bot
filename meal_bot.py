@@ -206,28 +206,36 @@ def cleanup_github_images():
                 print(f"  ⚠️ {item['name']} 삭제 실패: {del_resp.status_code}")
 
 
-def wait_for_pages_deploy():
-    """GitHub Pages 배포 완료 대기"""
-    if not GITHUB_TOKEN:
+def wait_for_pages_available(downloaded):
+    """푸시된 이미지가 GitHub Pages CDN에서 실제 200 응답할 때까지 대기.
+
+    builds/latest API는 이전 실행의 'built' 상태를 stale하게 반환할 수 있어
+    실제 URL HEAD 폴링이 더 안전하다. Slack image proxy가 404를 캐시하면
+    같은 메시지에서 이미지가 영영 안 뜨므로 propagation 완료 전 POST 금지.
+    """
+    if not downloaded:
         return
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-    print("  ⏳ GitHub Pages 배포 대기 중...")
-    for i in range(12):  # 최대 60초 대기
+    pending = [filename for filename, _ in downloaded.values()]
+    total = len(pending)
+    print(f"  ⏳ GitHub Pages 이미지 응답 대기 중... ({total}개)")
+    max_attempts = 36  # 5초 × 36 = 최대 3분
+    for attempt in range(max_attempts):
+        still_pending = []
+        for filename in pending:
+            url = f"{GITHUB_PAGES_BASE}/{filename}"
+            try:
+                if requests.head(url, timeout=10).status_code != 200:
+                    still_pending.append(filename)
+            except Exception:
+                still_pending.append(filename)
+        pending = still_pending
+        if not pending:
+            print(f"  ✅ Pages 응답 확인 완료 ({total}/{total})")
+            return
+        if attempt == 0 or (attempt + 1) % 6 == 0:
+            print(f"    대기 중... {total - len(pending)}/{total} 응답")
         time.sleep(5)
-        resp = requests.get(
-            f"https://api.github.com/repos/{GITHUB_REPO}/pages/builds/latest",
-            headers=headers
-        )
-        if resp.status_code == 200:
-            status = resp.json().get("status")
-            if status == "built":
-                print("  ✅ Pages 배포 완료")
-                return
-            print(f"    배포 상태: {status}...")
-    print("  ⚠️ Pages 배포 대기 타임아웃 (전송은 계속 진행)")
+    print(f"  ⚠️ Pages 응답 타임아웃 ({len(pending)}개 미응답, 전송은 계속)")
 
 
 def send_to_slack(menu_list, downloaded_images, operating_hours=None):
@@ -380,7 +388,7 @@ def run_with_image_check():
             if downloaded:
                 print("  GitHub에 이미지 push 중...")
                 push_images_to_github(downloaded)
-                wait_for_pages_deploy()
+                wait_for_pages_available(downloaded)
 
         _, hours = get_operating_hours()
         print(f"  슬랙 전송 중... (이미지 {actual_images}개)")
@@ -431,7 +439,7 @@ if __name__ == "__main__":
             if downloaded:
                 print("GitHub에 이미지 push 중...")
                 push_images_to_github(downloaded)
-                wait_for_pages_deploy()
+                wait_for_pages_available(downloaded)
 
         print(f"슬랙 전송 중... (이미지 {len(downloaded)}개)")
         send_to_slack(menu_data, downloaded, operating_hours=hours)
