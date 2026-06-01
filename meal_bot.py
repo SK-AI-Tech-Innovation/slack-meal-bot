@@ -212,13 +212,17 @@ def wait_for_pages_available(downloaded):
     builds/latest API는 이전 실행의 'built' 상태를 stale하게 반환할 수 있어
     실제 URL HEAD 폴링이 더 안전하다. Slack image proxy가 404를 캐시하면
     같은 메시지에서 이미지가 영영 안 뜨므로 propagation 완료 전 POST 금지.
+
+    실제 200 확인된 파일명 set을 반환한다. 타임아웃 시 미확인 파일은
+    제외되며, 호출부는 확인된 이미지만 첨부해 404 캐시를 방지한다.
     """
     if not downloaded:
-        return
-    pending = [filename for filename, _ in downloaded.values()]
+        return set()
+    all_files = {filename for filename, _ in downloaded.values()}
+    pending = list(all_files)
     total = len(pending)
     print(f"  ⏳ GitHub Pages 이미지 응답 대기 중... ({total}개)")
-    max_attempts = 36  # 5초 × 36 = 최대 3분
+    max_attempts = 72  # 5초 × 72 = 최대 6분 (느린 Pages 빌드 대비)
     for attempt in range(max_attempts):
         still_pending = []
         for filename in pending:
@@ -231,21 +235,29 @@ def wait_for_pages_available(downloaded):
         pending = still_pending
         if not pending:
             print(f"  ✅ Pages 응답 확인 완료 ({total}/{total})")
-            return
+            return all_files
         if attempt == 0 or (attempt + 1) % 6 == 0:
             print(f"    대기 중... {total - len(pending)}/{total} 응답")
         time.sleep(5)
-    print(f"  ⚠️ Pages 응답 타임아웃 ({len(pending)}개 미응답, 전송은 계속)")
+    confirmed = all_files - set(pending)
+    print(f"  ⚠️ Pages 응답 타임아웃 — 확인 {len(confirmed)}/{total}개만 첨부, "
+          f"미확인 {len(pending)}개는 이미지 없이 전송")
+    return confirmed
 
 
-def send_to_slack(menu_list, downloaded_images, operating_hours=None):
-    """Webhook으로 슬랙에 메뉴 전송 (이미지는 GitHub Pages URL)"""
+def send_to_slack(menu_list, downloaded_images, operating_hours=None, available_files=None):
+    """Webhook으로 슬랙에 메뉴 전송 (이미지는 GitHub Pages URL).
+
+    available_files: Pages에서 200 확인된 파일명 set. 여기 없는 이미지는
+    URL을 붙이지 않아 Slack 프록시의 404 캐시를 막는다. None이면 전체 첨부.
+    """
     weekdays = ['월', '화', '수', '목', '금', '토', '일']
     now = datetime.datetime.now(KST)
     today_str = now.strftime("%Y년 %m월 %d일") + f"({weekdays[now.weekday()]})"
     meal_name = {'LN': '점심', 'BF': '조식', 'DN': '석식', 'SN': '야식'}.get(MEAL_TYPE, '식사')
     colors = ["#FF9900", "#33CC33", "#3366FF", "#FF3366", "#9933CC", "#00BFFF", "#FFD700"]
     attachments = []
+    attached_count = 0
 
     for idx, item in enumerate(menu_list):
         course = item.get('COURSE_NAME', '?')
@@ -262,11 +274,13 @@ def send_to_slack(menu_list, downloaded_images, operating_hours=None):
             "fallback": f"{course} 메뉴"
         }
 
-        # GitHub Pages URL로 이미지 첨부
+        # GitHub Pages URL로 이미지 첨부 (Pages 200 확인된 것만 — 404 캐시 방지)
         img_data = downloaded_images.get(course)
         if img_data:
             filename = img_data[0] if isinstance(img_data, tuple) else img_data
-            attachment["image_url"] = f"{GITHUB_PAGES_BASE}/{filename}"
+            if available_files is None or filename in available_files:
+                attachment["image_url"] = f"{GITHUB_PAGES_BASE}/{filename}"
+                attached_count += 1
 
         attachments.append(attachment)
 
@@ -275,8 +289,8 @@ def send_to_slack(menu_list, downloaded_images, operating_hours=None):
     if operating_hours:
         context_elements.append({"type": "mrkdwn", "text": f"🕐 {operating_hours}"})
 
-    # 부분 전송 시 원본 메뉴 페이지 링크 추가
-    if len(downloaded_images) < len(menu_list):
+    # 이미지가 일부라도 빠지면(미업로드/미배포) 원본 메뉴 페이지 링크 추가
+    if attached_count < len(menu_list):
         context_elements.append({"type": "mrkdwn", "text": "🔗 <https://mc.skhystec.com/V3/menu.html|원본 메뉴 보기>"})
 
     payload = {
@@ -382,17 +396,19 @@ def run_with_image_check():
                 print(f"  ⏰ 11:{deadline_minute:02d} 경과 — 다운로드 {actual_images}/{total_courses}개만 성공, 있는 것만으로 전송")
 
         # GitHub: 기존 이미지 정리 → 새 이미지 push → Pages 배포 대기
+        available_files = None
         if GITHUB_TOKEN:
             print("  🗑️ GitHub 기존 이미지 정리 중...")
             cleanup_github_images()
             if downloaded:
                 print("  GitHub에 이미지 push 중...")
                 push_images_to_github(downloaded)
-                wait_for_pages_available(downloaded)
+                available_files = wait_for_pages_available(downloaded)
 
         _, hours = get_operating_hours()
-        print(f"  슬랙 전송 중... (이미지 {actual_images}개)")
-        send_to_slack(menu_data, downloaded, operating_hours=hours)
+        confirmed = len(available_files) if available_files is not None else actual_images
+        print(f"  슬랙 전송 중... (확인된 이미지 {confirmed}/{actual_images}개)")
+        send_to_slack(menu_data, downloaded, operating_hours=hours, available_files=available_files)
         return
 
 
@@ -433,13 +449,15 @@ if __name__ == "__main__":
         downloaded = download_images(menu_data)
 
         # GitHub: 기존 이미지 정리 → 새 이미지 push → Pages 배포 대기
+        available_files = None
         if GITHUB_TOKEN:
             print("🗑️ GitHub 기존 이미지 정리 중...")
             cleanup_github_images()
             if downloaded:
                 print("GitHub에 이미지 push 중...")
                 push_images_to_github(downloaded)
-                wait_for_pages_available(downloaded)
+                available_files = wait_for_pages_available(downloaded)
 
-        print(f"슬랙 전송 중... (이미지 {len(downloaded)}개)")
-        send_to_slack(menu_data, downloaded, operating_hours=hours)
+        confirmed = len(available_files) if available_files is not None else len(downloaded)
+        print(f"슬랙 전송 중... (확인된 이미지 {confirmed}/{len(downloaded)}개)")
+        send_to_slack(menu_data, downloaded, operating_hours=hours, available_files=available_files)
