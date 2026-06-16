@@ -245,18 +245,27 @@ def wait_for_pages_available(downloaded):
     return confirmed
 
 
+def _slack_escape(text):
+    """Slack mrkdwn 특수문자 이스케이프 (&, <, >)"""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def send_to_slack(menu_list, downloaded_images, operating_hours=None, available_files=None):
-    """Webhook으로 슬랙에 메뉴 전송 (이미지는 GitHub Pages URL).
+    """Webhook으로 슬랙에 메뉴 전송 (코스별 Carousel 카드, 이미지는 GitHub Pages URL).
+
+    사진이 세로로 길게 쌓이는 문제를 막기 위해 코스 1개 = 카드 1개로 묶어
+    가로 스크롤 Carousel 블록으로 전송한다. 카드는 사진(hero_image) + 제목 +
+    반찬 설명(body)을 한 덩어리로 담는다.
 
     available_files: Pages에서 200 확인된 파일명 set. 여기 없는 이미지는
-    URL을 붙이지 않아 Slack 프록시의 404 캐시를 막는다. None이면 전체 첨부.
+    hero_image를 붙이지 않아 Slack 프록시의 404 캐시를 막는다(카드는 텍스트만
+    표시). None이면 전체 첨부.
     """
     weekdays = ['월', '화', '수', '목', '금', '토', '일']
     now = datetime.datetime.now(KST)
     today_str = now.strftime("%Y년 %m월 %d일") + f"({weekdays[now.weekday()]})"
     meal_name = {'LN': '점심', 'BF': '조식', 'DN': '석식', 'SN': '야식'}.get(MEAL_TYPE, '식사')
-    colors = ["#FF9900", "#33CC33", "#3366FF", "#FF3366", "#9933CC", "#00BFFF", "#FFD700"]
-    attachments = []
+    cards = []
     attached_count = 0
 
     for idx, item in enumerate(menu_list):
@@ -267,11 +276,12 @@ def send_to_slack(menu_list, downloaded_images, operating_hours=None, available_
         kcal = item.get('KCAL', '')
         kcal_str = f" ({kcal}kcal)" if kcal else ""
 
-        attachment = {
-            "color": colors[idx % len(colors)],
-            "title": f"{course}: {menu_name}{kcal_str}",
-            "text": f"🍽️ {sides_str}",
-            "fallback": f"{course} 메뉴"
+        # 카드: 사진 + 제목 + 반찬 설명을 한 덩어리로 (title 150자 / body 200자 제한)
+        card = {
+            "type": "card",
+            "block_id": f"course_{idx}",
+            "title": {"type": "mrkdwn", "text": _slack_escape(f"{course}: {menu_name}{kcal_str}")},
+            "body": {"type": "mrkdwn", "text": _slack_escape(f"🍽️ {sides_str}")},
         }
 
         # GitHub Pages URL로 이미지 첨부 (Pages 200 확인된 것만 — 404 캐시 방지)
@@ -279,10 +289,14 @@ def send_to_slack(menu_list, downloaded_images, operating_hours=None, available_
         if img_data:
             filename = img_data[0] if isinstance(img_data, tuple) else img_data
             if available_files is None or filename in available_files:
-                attachment["image_url"] = f"{GITHUB_PAGES_BASE}/{filename}"
+                card["hero_image"] = {
+                    "type": "image",
+                    "image_url": f"{GITHUB_PAGES_BASE}/{filename}",
+                    "alt_text": f"{course} 메뉴 사진",
+                }
                 attached_count += 1
 
-        attachments.append(attachment)
+        cards.append(card)
 
     # context 요소 구성
     context_elements = [{"type": "mrkdwn", "text": f"📍 *비원(분당캠퍼스)*"}]
@@ -293,24 +307,27 @@ def send_to_slack(menu_list, downloaded_images, operating_hours=None, available_
     if attached_count < len(menu_list):
         context_elements.append({"type": "mrkdwn", "text": "🔗 <https://mc.skhystec.com/V3/menu.html|원본 메뉴 보기>"})
 
-    payload = {
-        "blocks": [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"📅 {today_str}  🍱 {meal_name}",
-                    "emoji": True
-                }
-            },
-            {
-                "type": "context",
-                "elements": context_elements
-            },
-            {"type": "divider"}
-        ],
-        "attachments": attachments
-    }
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"📅 {today_str}  🍱 {meal_name}",
+                "emoji": True
+            }
+        },
+        {
+            "type": "context",
+            "elements": context_elements
+        },
+        {"type": "divider"},
+    ]
+
+    # Carousel은 카드 최대 10개 — 10개 단위로 나눠 블록 추가 (코스는 보통 4~7개)
+    for i in range(0, len(cards), 10):
+        blocks.append({"type": "carousel", "elements": cards[i:i + 10]})
+
+    payload = {"blocks": blocks}
     response = requests.post(SLACK_WEBHOOK_URL, json=payload)
     response.raise_for_status()
     print("✅ 슬랙 전송 성공!")
