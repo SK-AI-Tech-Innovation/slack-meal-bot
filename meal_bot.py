@@ -275,13 +275,17 @@ def send_to_slack(menu_list, downloaded_images, operating_hours=None, available_
         sides_str = ", ".join(sides) if sides else "-"
         kcal = item.get('KCAL', '')
         kcal_str = f" ({kcal}kcal)" if kcal else ""
+        origin = item.get('MENU_ORIGIN', '').strip()
 
         # 카드: 사진 + 제목 + 반찬 설명을 한 덩어리로 (title 150자 / body 200자 제한)
+        body_text = f"🍽️ {sides_str}"
+        if origin:
+            body_text += f"\n📋 원산지 {origin}"
         card = {
             "type": "card",
             "block_id": f"course_{idx}",
             "title": {"type": "mrkdwn", "text": _slack_escape(f"{course}: {menu_name}{kcal_str}")},
-            "body": {"type": "mrkdwn", "text": _slack_escape(f"🍽️ {sides_str}")},
+            "body": {"type": "mrkdwn", "text": _slack_escape(body_text)},
         }
 
         # GitHub Pages URL로 이미지 첨부 (Pages 200 확인된 것만 — 404 캐시 방지)
