@@ -272,21 +272,30 @@ def send_to_slack(menu_list, downloaded_images, operating_hours=None, available_
         course = item.get('COURSE_NAME', '?')
         menu_name = item.get('MENU_NAME', '?')
         sides = [item.get(f'SIDE_{i}', '').strip() for i in range(1, 7) if item.get(f'SIDE_{i}')]
-        sides_str = ", ".join(sides) if sides else "-"
         kcal = item.get('KCAL', '')
         kcal_str = f" ({kcal}kcal)" if kcal else ""
         origin = item.get('MENU_ORIGIN', '').strip()
 
-        # 카드: 사진 + 제목 + 반찬 설명을 한 덩어리로 (title 150자 / body 200자 제한)
-        body_text = f"🍽️ {sides_str}"
-        if origin:
-            body_text += f"\n📋 원산지 {origin}"
+        # 카드: 사진 + 제목(코너/메인메뉴) + 부제목(원산지) + 본문(반찬 목록).
+        # 원본 메뉴 페이지와 동일하게 원산지를 먼저, 그 아래 반찬을 목록형으로 표시한다.
+        # 원산지는 body에 텍스트 구분선으로 나누지 않고 subtitle 필드로 분리한다 —
+        # card.body는 블록 중첩이 불가능해(단일 text 객체) 진짜 divider를 넣을 수 없고,
+        # "───" 같은 글자 선은 카드 폭이 클라이언트마다 달라 좁은 화면에서 줄바꿈된다.
+        # subtitle은 Slack이 폭에 맞춰 자체 스타일로 그려주므로 어디서든 깨지지 않는다.
+        # (실제 렌더링 확인: 회색 작은 글씨 + body와의 여백이 자동으로 잡힌다)
+        # 불릿은 "-" 대신 "•" — Slack mrkdwn 블록에서 리스트 렌더링이 보장되지 않아
+        # 문자 그대로 찍히는 "•"가 클라이언트에 상관없이 안전하다.
+        # (title 150자 / body 200자 제한)
         card = {
             "type": "card",
             "block_id": f"course_{idx}",
             "title": {"type": "mrkdwn", "text": _slack_escape(f"{course}: {menu_name}{kcal_str}")},
-            "body": {"type": "mrkdwn", "text": _slack_escape(body_text)},
         }
+        if origin:
+            card["subtitle"] = {"type": "mrkdwn", "text": _slack_escape(origin)}
+        if sides:
+            body_text = "\n".join(f"• {side}" for side in sides)
+            card["body"] = {"type": "mrkdwn", "text": _slack_escape(body_text)}
 
         # GitHub Pages URL로 이미지 첨부 (Pages 200 확인된 것만 — 404 캐시 방지)
         img_data = downloaded_images.get(course)
